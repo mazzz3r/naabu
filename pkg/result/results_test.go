@@ -198,3 +198,24 @@ func TestGetIPsPortsEarlyReturn(t *testing.T) {
 		return len(out) == len(targetIPs)-1
 	}, 5*time.Second, 10*time.Millisecond)
 }
+
+func TestUpdateHostOS(t *testing.T) {
+	res := NewResult()
+	p := &port.Port{Port: 22, Protocol: protocol.TCP}
+	res.AddPort("192.0.2.1", p)
+	res.AddPort("192.0.2.2", p)
+
+	osfp := &OSFingerprint{Target: "192.0.2.1", OSDetails: "Linux 5.x"}
+	res.UpdateHostOS("192.0.2.1", osfp)
+	// nil must not clear existing info
+	res.UpdateHostOS("192.0.2.1", nil)
+
+	got := make(map[string]*OSFingerprint)
+	for hostResult := range res.GetIPsPorts() {
+		got[hostResult.IP] = hostResult.OS
+	}
+
+	assert.Len(t, got, 2)
+	assert.Equal(t, osfp, got["192.0.2.1"])
+	assert.Nil(t, got["192.0.2.2"])
+}
