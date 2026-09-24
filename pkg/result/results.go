@@ -58,20 +58,17 @@ func NewResult() *Result {
 	}
 }
 
-// AddPort to a specific ip
+// GetIPs returns a snapshot of the ips. The lock is released before returning,
+// so the caller may use any other Result method while ranging over it.
 func (r *Result) GetIPs() chan string {
-	r.Lock()
+	r.RLock()
+	defer r.RUnlock()
 
-	out := make(chan string)
-
-	go func() {
-		defer close(out)
-		defer r.Unlock()
-
-		for ip := range r.ips {
-			out <- ip
-		}
-	}()
+	out := make(chan string, len(r.ips))
+	for ip := range r.ips {
+		out <- ip
+	}
+	close(out)
 
 	return out
 }
@@ -83,27 +80,31 @@ func (r *Result) HasIPS() bool {
 	return len(r.ips) > 0
 }
 
-// GetIpsPorts returns the ips and ports
+// GetIPsPorts returns a snapshot of the ips and ports. The lock is released
+// before streaming, so the caller may use any other Result method while
+// ranging over it.
 func (r *Result) GetIPsPorts() chan *HostResult {
 	r.RLock()
+	hostResults := make([]*HostResult, 0, len(r.ipPorts))
+	for ip, ports := range r.ipPorts {
+		confidenceLevel := confidence.Normal
+		if _, ok := r.skipped[ip]; ok {
+			confidenceLevel = confidence.Low
+		}
+		hostResults = append(hostResults, &HostResult{IP: ip, Ports: maps.Values(ports), Confidence: confidenceLevel})
+	}
+	r.RUnlock()
 
-	out := make(chan *HostResult)
+	// buffered so the producer never blocks if the caller stops ranging early
+	out := make(chan *HostResult, len(hostResults))
 
 	go func() {
 		defer close(out)
-		defer r.RUnlock()
 
-		for ip, ports := range r.ipPorts {
-			confidenceLevel := confidence.Normal
-			if r.HasSkipped(ip) {
-				confidenceLevel = confidence.Low
-			}
-
-			hostResult := &HostResult{IP: ip, Ports: maps.Values(ports), Confidence: confidenceLevel}
-
+		for _, hostResult := range hostResults {
 			// Perform ARP lookup for private/local network IPs
-			if isPrivateIP(ip) {
-				if macAddr, err := GetMacAddress(ip); err == nil {
+			if isPrivateIP(hostResult.IP) {
+				if macAddr, err := GetMacAddress(hostResult.IP); err == nil {
 					hostResult.MacAddress = macAddr
 				}
 			}
@@ -148,6 +149,23 @@ func (r *Result) SetPorts(ip string, ports []*port.Port) {
 		r.ipPorts[ip][p.String()] = p
 	}
 	r.ips[ip] = struct{}{}
+}
+
+// UpdatePortService copies the service info of p onto the stored port of ip
+// with the same number and protocol. It reports whether ip already has a port
+// with that number, so callers can add p when it doesn't.
+func (r *Result) UpdatePortService(ip string, p *port.Port) bool {
+	r.Lock()
+	defer r.Unlock()
+
+	existing, ok := r.ipPorts[ip][p.String()]
+	if !ok {
+		return false
+	}
+	if existing.Protocol == p.Protocol && p.Service != nil {
+		existing.Service = p.Service
+	}
+	return true
 }
 
 // IPHasPort checks if an ip has a specific port
