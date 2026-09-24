@@ -204,6 +204,27 @@ func TestHandleOutputCreatesNestedDir(t *testing.T) {
 	require.NoError(t, err, "output to a non-existent nested path must create the directory")
 }
 
+func TestHandleOutputOnResultCarriesOS(t *testing.T) {
+	runner := newConnectRunner(t)
+	runner.options.DisableStdout = true
+
+	var got []*result.HostResult
+	runner.options.OnResult = func(hr *result.HostResult) {
+		got = append(got, hr)
+	}
+
+	osfp := &result.OSFingerprint{Target: "203.0.113.7", OSDetails: "Linux 5.x"}
+	res := result.NewResult()
+	res.AddPort("203.0.113.7", &port.Port{Port: 80, Protocol: protocol.TCP})
+	res.UpdateHostOS("203.0.113.7", osfp)
+	runner.handleOutput(res)
+
+	require.NotEmpty(t, got)
+	for _, hr := range got {
+		require.Equal(t, osfp, hr.OS)
+	}
+}
+
 func TestWriteNmapFormatsNoOpWhenUnset(t *testing.T) {
 	runner := newConnectRunner(t)
 	res := result.NewResult()

@@ -1721,6 +1721,7 @@ func (r *Runner) handleOutput(scanResults *result.Result) {
 						IP:         hostResult.IP,
 						Ports:      hostResult.Ports,
 						Confidence: hostResult.Confidence,
+						OS:         hostResult.OS,
 					})
 				}
 			}
