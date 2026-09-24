@@ -95,7 +95,8 @@ func (r *Result) GetIPsPorts() chan *HostResult {
 	}
 	r.RUnlock()
 
-	out := make(chan *HostResult)
+	// buffered so the producer never blocks if the caller stops ranging early
+	out := make(chan *HostResult, len(hostResults))
 
 	go func() {
 		defer close(out)
