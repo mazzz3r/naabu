@@ -2,9 +2,11 @@ package result
 
 import (
 	"testing"
+	"time"
 
 	"github.com/projectdiscovery/naabu/v2/pkg/port"
 	"github.com/projectdiscovery/naabu/v2/pkg/protocol"
+	"github.com/projectdiscovery/naabu/v2/pkg/result/confidence"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -94,4 +96,69 @@ func TestMACAddress(t *testing.T) {
 	// empty MAC values are ignored and never overwrite an existing entry
 	res.SetMACAddress("10.0.0.1", "")
 	assert.Equal(t, "aa:bb:cc:dd:ee:ff", res.GetMACAddress("10.0.0.1"))
+}
+
+// runWithTimeout fails the test instead of hanging forever when fn deadlocks.
+func runWithTimeout(t *testing.T, fn func()) {
+	t.Helper()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fn()
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("deadlock: timed out while ranging over results")
+	}
+}
+
+func TestGetIPsReentrant(t *testing.T) {
+	res := NewResult()
+	targetIPs := []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}
+	for _, ip := range targetIPs {
+		res.AddIp(ip)
+		res.SetMACAddress(ip, "aa:bb:cc:dd:ee:ff")
+	}
+
+	var got []string
+	runWithTimeout(t, func() {
+		for ip := range res.GetIPs() {
+			// readers and writers on the same result must not block while
+			// the consumer is still ranging (mirrors handleOutput in -sn mode)
+			assert.True(t, res.HasIP(ip))
+			assert.Equal(t, "aa:bb:cc:dd:ee:ff", res.GetMACAddress(ip))
+			res.AddDeadHost(ip)
+			got = append(got, ip)
+		}
+	})
+	assert.ElementsMatch(t, targetIPs, got)
+}
+
+func TestGetIPsPortsReentrant(t *testing.T) {
+	res := NewResult()
+	// non-private ips so that no ARP lookup is attempted
+	targetIPs := []string{"192.0.2.1", "192.0.2.2", "192.0.2.3"}
+	targetPort := &port.Port{Port: 80, Protocol: protocol.TCP}
+	for _, ip := range targetIPs {
+		res.AddPort(ip, targetPort)
+	}
+	res.AddSkipped("192.0.2.2")
+
+	var got []string
+	runWithTimeout(t, func() {
+		for hostResult := range res.GetIPsPorts() {
+			assert.True(t, res.IPHasPort(hostResult.IP, targetPort))
+			if hostResult.IP == "192.0.2.2" {
+				assert.Equal(t, confidence.Low, hostResult.Confidence)
+			} else {
+				assert.Equal(t, confidence.Normal, hostResult.Confidence)
+			}
+			res.AddPort(hostResult.IP, &port.Port{Port: 443, Protocol: protocol.TCP})
+			got = append(got, hostResult.IP)
+		}
+	})
+	assert.ElementsMatch(t, targetIPs, got)
 }
