@@ -33,7 +33,7 @@ func newMillisecondDuration(value *time.Duration, defaultValue time.Duration) *m
 func (m *millisecondDuration) Set(s string) error {
 	// A bare number is milliseconds. Parsing it with the unit appended lets
 	// the duration parser reject values that overflow time.Duration.
-	if _, err := strconv.Atoi(s); err == nil {
+	if _, err := strconv.ParseInt(s, 10, 64); err == nil {
 		s += "ms"
 	}
 	d, err := timeutil.ParseDuration(s)

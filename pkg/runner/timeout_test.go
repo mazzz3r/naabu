@@ -15,6 +15,7 @@ func TestMillisecondDurationSet(t *testing.T) {
 	}{
 		{in: "200", want: 200 * time.Millisecond},
 		{in: "1000", want: time.Second},
+		{in: "3000000000", want: 3000000000 * time.Millisecond},
 		{in: "200ms", want: 200 * time.Millisecond},
 		{in: "2s", want: 2 * time.Second},
 		{in: "1m", want: time.Minute},
