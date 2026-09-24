@@ -55,6 +55,25 @@ func TestIPHasPort(t *testing.T) {
 	assert.False(t, res.IPHasPort(targetIP, unexpectedPort))
 }
 
+func TestUpdatePortService(t *testing.T) {
+	targetIP := "127.0.0.1"
+	stored := &port.Port{Port: 80, Protocol: protocol.TCP}
+	service := &port.Service{Name: "http"}
+
+	res := NewResult()
+	res.AddPort(targetIP, stored)
+
+	assert.True(t, res.UpdatePortService(targetIP, &port.Port{Port: 80, Protocol: protocol.TCP, Service: service}))
+	assert.Equal(t, service, stored.Service)
+
+	// same number, other protocol: the port exists but keeps its service info
+	assert.True(t, res.UpdatePortService(targetIP, &port.Port{Port: 80, Protocol: protocol.UDP, Service: &port.Service{Name: "dns"}}))
+	assert.Equal(t, service, stored.Service)
+
+	assert.False(t, res.UpdatePortService(targetIP, &port.Port{Port: 81, Protocol: protocol.TCP, Service: service}))
+	assert.False(t, res.UpdatePortService("127.0.0.2", &port.Port{Port: 80, Protocol: protocol.TCP, Service: service}))
+}
+
 func TestAddIP(t *testing.T) {
 	targetIP := "127.0.0.1"
 

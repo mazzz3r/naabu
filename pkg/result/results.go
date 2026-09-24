@@ -151,6 +151,23 @@ func (r *Result) SetPorts(ip string, ports []*port.Port) {
 	r.ips[ip] = struct{}{}
 }
 
+// UpdatePortService copies the service info of p onto the stored port of ip
+// with the same number and protocol. It reports whether ip already has a port
+// with that number, so callers can add p when it doesn't.
+func (r *Result) UpdatePortService(ip string, p *port.Port) bool {
+	r.Lock()
+	defer r.Unlock()
+
+	existing, ok := r.ipPorts[ip][p.String()]
+	if !ok {
+		return false
+	}
+	if existing.Protocol == p.Protocol && p.Service != nil {
+		existing.Service = p.Service
+	}
+	return true
+}
+
 // IPHasPort checks if an ip has a specific port
 func (r *Result) IPHasPort(ip string, p *port.Port) bool {
 	r.RLock()
