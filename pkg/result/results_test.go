@@ -162,3 +162,20 @@ func TestGetIPsPortsReentrant(t *testing.T) {
 	})
 	assert.ElementsMatch(t, targetIPs, got)
 }
+
+func TestGetIPsPortsEarlyReturn(t *testing.T) {
+	res := NewResult()
+	// non-private ips so that no ARP lookup is attempted
+	targetIPs := []string{"192.0.2.1", "192.0.2.2", "192.0.2.3"}
+	for _, ip := range targetIPs {
+		res.AddPort(ip, &port.Port{Port: 80, Protocol: protocol.TCP})
+	}
+
+	// consumers like UpdateHostOS stop after the first match; the producer
+	// must still run to completion instead of blocking forever on send
+	out := res.GetIPsPorts()
+	<-out
+	assert.Eventually(t, func() bool {
+		return len(out) == len(targetIPs)-1
+	}, 5*time.Second, 10*time.Millisecond)
+}
