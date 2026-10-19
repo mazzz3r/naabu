@@ -3,6 +3,7 @@ package runner
 import (
 	"bytes"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -96,6 +97,31 @@ func TestCopyServiceFieldsCPEsMultiple(t *testing.T) {
 	result := &Result{}
 	copyServiceFields(result, svc)
 	assert.Equal(t, 2, len(result.CPEs))
+}
+
+func TestResultServiceSurvivesJSON(t *testing.T) {
+	want := &port.Service{
+		DeviceType: "router", ExtraInfo: "extra", HighVersion: "2.0", Hostname: "host",
+		LowVersion: "1.0", Method: "probed", Name: "http", OSType: "Linux",
+		Product: "nginx", Proto: "rpc", RPCNum: "100000", Banner: "banner",
+		ServiceFP: "fp", Tunnel: "ssl", Version: "1.25", Confidence: 10,
+		CPEs: []string{"cpe:/a:nginx:nginx:1.25"},
+	}
+	// every field is set, so a field lost on the way fails the test
+	fields := reflect.ValueOf(*want)
+	for i := range fields.NumField() {
+		require.False(t, fields.Field(i).IsZero(), "set %s in want", fields.Type().Field(i).Name)
+	}
+
+	// -dashboard-upload reads the JSON output back into a Result
+	result := &Result{IP: "127.0.0.1", Port: 80, Protocol: "tcp"}
+	copyServiceFields(result, want)
+	b, err := result.JSON(nil)
+	require.NoError(t, err)
+	var decoded Result
+	require.NoError(t, json.Unmarshal(b, &decoded))
+
+	assert.Equal(t, want, decoded.Service())
 }
 
 func TestWriteJSONOutputWithServiceInfo(t *testing.T) {

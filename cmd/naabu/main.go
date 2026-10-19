@@ -43,24 +43,6 @@ func main() {
 			if err != nil {
 				gologger.Fatal().Msgf("Could not decode jsonl file: %s\n", err)
 			}
-			service := &port.Service{
-				DeviceType:  r.DeviceType,
-				ExtraInfo:   r.ExtraInfo,
-				HighVersion: r.HighVersion,
-				Hostname:    r.Hostname,
-				LowVersion:  r.LowVersion,
-				Method:      r.Method,
-				Name:        r.Name,
-				OSType:      r.OSType,
-				Product:     r.Product,
-				Proto:       r.Proto,
-				RPCNum:      r.RPCNum,
-				Banner:      r.Banner,
-				ServiceFP:   r.ServiceFP,
-				Tunnel:      r.Tunnel,
-				Version:     r.Version,
-				Confidence:  r.Confidence,
-			}
 			var osfp *result.OSFingerprint
 			if r.OS != "" || r.OSCPE != "" {
 				osfp = &result.OSFingerprint{Target: r.IP, OSDetails: r.OS, OSCPE: r.OSCPE}
@@ -73,7 +55,7 @@ func main() {
 						Port:     r.Port,
 						Protocol: protocol.ParseProtocol(r.Protocol),
 						TLS:      r.TLS,
-						Service:  service,
+						Service:  r.Service(),
 					},
 				},
 				OS: osfp,

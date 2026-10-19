@@ -386,6 +386,29 @@ func copyServiceFields(result *Result, service *port.Service) {
 	result.CPEs = s.CPEs
 }
 
+// Service returns the service fields of the result, the reverse of copyServiceFields.
+func (r *Result) Service() *port.Service {
+	return &port.Service{
+		DeviceType:  r.DeviceType,
+		ExtraInfo:   r.ExtraInfo,
+		HighVersion: r.HighVersion,
+		Hostname:    r.Hostname,
+		LowVersion:  r.LowVersion,
+		Method:      r.Method,
+		Name:        r.Name,
+		OSType:      r.OSType,
+		Product:     r.Product,
+		Proto:       r.Proto,
+		RPCNum:      r.RPCNum,
+		Banner:      r.Banner,
+		ServiceFP:   r.ServiceFP,
+		Tunnel:      r.Tunnel,
+		Version:     r.Version,
+		Confidence:  r.Confidence,
+		CPEs:        r.CPEs,
+	}
+}
+
 func formatServiceInfo(svc *port.Service) string {
 	if svc == nil || svc.Name == "" {
 		return ""
