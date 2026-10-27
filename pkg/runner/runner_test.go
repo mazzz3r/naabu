@@ -17,6 +17,7 @@ import (
 
 	"github.com/miekg/dns"
 	"github.com/projectdiscovery/naabu/v2/pkg/fingerprint"
+	"github.com/projectdiscovery/naabu/v2/pkg/fingerprint/udp"
 	"github.com/projectdiscovery/naabu/v2/pkg/port"
 	"github.com/projectdiscovery/naabu/v2/pkg/privileges"
 	"github.com/projectdiscovery/naabu/v2/pkg/protocol"
@@ -853,23 +854,35 @@ func TestWaitServiceDetectionReusableAcrossRuns(t *testing.T) {
 	// does; the second run must not deadlock waiting on fpDone.
 	for i := 0; i < 2; i++ {
 		r.fpQueue = newFpQueue()
-		r.fpTargetCh = make(chan fingerprint.Target, 1)
+		r.fpTCPCh = make(chan fingerprint.Target, 1)
+		r.fpUDPCh = make(chan udp.Target, 1)
 		r.fpDone = make(chan struct{})
-		go func(q *fpQueue, ch chan fingerprint.Target) {
+		go func(q *fpQueue, tcpCh chan fingerprint.Target, udpCh chan udp.Target) {
+			defer close(tcpCh)
+			defer close(udpCh)
 			for {
 				tgt, ok := q.pop()
 				if !ok {
-					close(ch)
 					return
 				}
-				ch <- tgt
+				tcpCh <- tgt
 			}
-		}(r.fpQueue, r.fpTargetCh)
-		go func(ch chan fingerprint.Target, done chan struct{}) {
-			for range ch {
+		}(r.fpQueue, r.fpTCPCh, r.fpUDPCh)
+		go func(tcpCh chan fingerprint.Target, udpCh chan udp.Target, done chan struct{}) {
+			for tcpCh != nil || udpCh != nil {
+				select {
+				case _, ok := <-tcpCh:
+					if !ok {
+						tcpCh = nil
+					}
+				case _, ok := <-udpCh:
+					if !ok {
+						udpCh = nil
+					}
+				}
 			}
 			close(done)
-		}(r.fpTargetCh, r.fpDone)
+		}(r.fpTCPCh, r.fpUDPCh, r.fpDone)
 
 		got := make(chan struct{})
 		go func() {
@@ -882,7 +895,8 @@ func TestWaitServiceDetectionReusableAcrossRuns(t *testing.T) {
 			t.Fatalf("run %d: waitServiceDetection deadlocked on reuse", i)
 		}
 		require.Nil(t, r.fpQueue, "fpQueue must be cleared so the next run can recreate it")
-		require.Nil(t, r.fpTargetCh, "fpTargetCh must be cleared so the next run can recreate it")
+		require.Nil(t, r.fpTCPCh, "fpTCPCh must be cleared so the next run can recreate it")
+		require.Nil(t, r.fpUDPCh, "fpUDPCh must be cleared so the next run can recreate it")
 	}
 }
 
@@ -891,7 +905,7 @@ func TestWaitServiceDetectionStoresServices(t *testing.T) {
 	r := &Runner{
 		fpQueue:    newFpQueue(),
 		fpDone:     make(chan struct{}),
-		fpServices: map[string]*port.Service{"192.0.2.1:80": svc},
+		fpServices: map[string]*port.Service{fpServiceKey(protocol.TCP, "192.0.2.1", 80): svc},
 	}
 	close(r.fpDone)
 

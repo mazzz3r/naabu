@@ -128,11 +128,12 @@ type Options struct {
 	ServiceVersionWorkers int
 	// ServiceProbesFile is an optional path to a custom nmap-service-probes file
 	ServiceProbesFile string
-	// UDPProbes enables port-scan-time UDP probing using the
-	// nmap-service-probes data from a locally installed nmap. When set,
-	// each UDP packet's payload is replaced with the highest-priority
-	// probe known for the destination port, instead of an empty
-	// datagram. A caller-supplied connect payload (-cp) still wins.
+	// UDPProbes enables port-scan-time UDP probing. When set, each UDP
+	// packet's payload is replaced with a protocol-specific probe for the
+	// destination port instead of an empty datagram. Payloads come from
+	// naabu's built-in UDP plugins (no nmap required); a local
+	// nmap-service-probes database, when present, adds coverage for ports the
+	// built-ins do not know. A caller-supplied connect payload (-cp) still wins.
 	UDPProbes bool
 	// ReversePTR lookup for ips
 	ReversePTR bool
@@ -295,12 +296,12 @@ func ParseOptions() *Options {
 
 	flagSet.CreateGroup("services-discovery", "Services-Discovery",
 		flagSet.BoolVarP(&options.ServiceDiscovery, "service-discovery", "sD", false, "Service Discovery"),
-		flagSet.BoolVarP(&options.ServiceVersion, "service-version", "sV", false, "Service Version"),
+		flagSet.BoolVarP(&options.ServiceVersion, "service-version", "sV", false, "Service Version (TCP via nmap-service-probes, UDP via built-in probes, no nmap needed)"),
 		flagSet.BoolVar(&options.ServiceVersionFast, "sV-fast", false, "only probe port-hinted services (faster)"),
 		flagSet.DurationVar(&options.ServiceVersionTimeout, "sV-timeout", 5*time.Second, "timeout for service version probes"),
 		flagSet.IntVar(&options.ServiceVersionWorkers, "sV-workers", 25, "number of concurrent service version workers"),
 		flagSet.StringVar(&options.ServiceProbesFile, "sV-probes", "", "custom nmap-service-probes file path (auto-detected from local nmap install if empty)"),
-		flagSet.BoolVarP(&options.UDPProbes, "udp-probes", "uP", false, "send protocol-specific payloads on UDP scans using nmap-service-probes"),
+		flagSet.BoolVarP(&options.UDPProbes, "udp-probes", "uP", false, "send protocol-specific payloads on UDP scans using built-in probes (nmap-service-probes used additionally when available)"),
 	)
 
 	flagSet.CreateGroup("optimization", "Optimization",

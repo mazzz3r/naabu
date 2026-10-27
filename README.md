@@ -89,12 +89,12 @@ OUTPUT:
 
 SERVICES-DISCOVERY:
    -sD, -service-discovery           identify services by port number
-   -sV, -service-version             detect service versions using nmap-service-probes
+   -sV, -service-version             detect service versions (TCP via nmap-service-probes, UDP via built-in probes, no nmap needed)
    -sV-fast                          only probe port-hinted services (faster, skips fallback)
    -sV-timeout duration              timeout for service version probes (default 5s)
    -sV-workers int                   number of concurrent service version workers (default 25)
    -sV-probes string                 custom nmap-service-probes file path (auto-detected from local nmap install if empty)
-   -uP, -udp-probes                  send protocol-specific payloads on UDP scans using nmap-service-probes
+   -uP, -udp-probes                  send protocol-specific payloads on UDP scans using built-in probes (nmap-service-probes used additionally when available)
 
 CONFIGURATION:
    -config string                   path to the naabu configuration file (default $HOME/.config/naabu/config.yaml)
@@ -406,11 +406,34 @@ Available flags:
 | `-sV-probes string` | Custom nmap-service-probes file path (auto-detected from local nmap install if empty) |
 | `-sD` | Service discovery (match port number to service name, no active probing) |
 
-The `-sV` flag requires the `nmap-service-probes` database file. naabu does not ship this database itself (it is licensed under the copyleft Nmap Public Source License, which is incompatible with naabu's MIT license), so it reads the file from a local nmap installation, automatically looking in standard nmap installation paths. To use a custom file, specify the path with `-sV-probes`.
+### TCP vs. UDP service detection
+
+`-sV` detects services on **both** TCP and UDP ports, but the two transports use
+different engines:
+
+- **TCP** detection matches banners against the `nmap-service-probes` database.
+  naabu does not ship this database itself (it is licensed under the copyleft
+  Nmap Public Source License, which is incompatible with naabu's MIT license),
+  so it reads the file from a local nmap installation, automatically looking in
+  standard nmap paths. Use `-sV-probes` to point at a custom file. Without the
+  database, TCP service detection is disabled (UDP detection is unaffected).
+- **UDP** detection is **native and self-contained** — it needs no nmap. Each
+  UDP protocol is a built-in plugin that sends the exact request a silent UDP
+  service needs and parses the reply. Over 30 protocols are covered, including
+  DNS, NTP, SNMP, IKE/IPsec, OpenVPN, WireGuard, NetBIOS, TFTP, NFS, SIP, CoAP,
+  STUN/TURN, IPMI, BACnet, KNX, QUIC and SMB-over-QUIC.
+
+```sh
+naabu -host scanme.sh -p u:53,u:123,u:161 -sV
+```
 
 # UDP Service Probes
 
-UDP services typically stay silent when they receive an empty datagram, so a blind UDP port scan misses most of them. With `-uP` (`-udp-probes`) naabu picks a protocol-specific payload from the `nmap-service-probes` database for each UDP port being scanned (DNS query for 53, NTP request for 123, SNMPv1 GetRequest for 161, and so on), so real services have something to reply to and naabu can report them as open.
+UDP services typically stay silent when they receive an empty datagram, so a
+blind UDP port scan misses most of them. With `-uP` (`-udp-probes`) naabu sends
+a protocol-specific payload for each UDP port being scanned (DNS query for 53,
+NTP request for 123, SNMPv1 GetRequest for 161, and so on), so real services
+have something to reply to and naabu can report them as open.
 
 ```sh
 naabu -host scanme.sh -p u:53,u:123,u:161 -uP
@@ -419,9 +442,9 @@ naabu -host scanme.sh -p u:53,u:123,u:161 -uP
 Notes:
 
 - `-uP` is opt-in and additive. When disabled (the default) UDP scans keep their historical zero-length-datagram behavior.
-- The selected probe is the highest-priority (lowest-rarity) match for the destination port; if no probe is registered for a port the scan falls back to the empty datagram.
+- Payloads come from naabu's **built-in** UDP plugins, so `-uP` works without nmap. When a local `nmap-service-probes` database is available it is layered on top to cover additional ports; the built-in payload wins for ports it already knows.
 - A user-supplied payload via `-cp` always wins over the automatic probe for that port.
-- `-uP` reuses the same probe database as `-sV`, so you can combine the two without paying the parse cost twice. The probe file is auto-located from a local nmap install; use `-sV-probes` to point at a custom file. If no database can be found `-uP` logs a warning and is silently disabled.
+- `-sV` on UDP ports enables these payloads automatically, since a UDP port is only reported open once it answers.
 
 # CDN/WAF Exclusion
 

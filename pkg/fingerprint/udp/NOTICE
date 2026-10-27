@@ -1,0 +1,17 @@
+naabu native UDP service detection
+===================================
+
+The UDP protocol plugins in this directory (pkg/fingerprint/udp/services/*)
+were adapted from the Nerva service fingerprinting engine:
+
+    https://github.com/praetorian-inc/nerva
+    Copyright 2022 Praetorian Security, Inc.
+    Licensed under the Apache License, Version 2.0.
+
+A copy of the Apache License 2.0 is available at:
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+The code was ported to naabu's own plugin interface and trimmed to the UDP
+detection path: security-misconfiguration findings, deep-probe behaviour and
+the TCP/TLS sibling plugins from the original were not carried over.

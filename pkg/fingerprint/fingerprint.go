@@ -2,6 +2,7 @@ package fingerprint
 
 import (
 	"github.com/projectdiscovery/naabu/v2/pkg/port"
+	"github.com/projectdiscovery/naabu/v2/pkg/protocol"
 )
 
 // Target represents a host:port to fingerprint.
@@ -9,6 +10,11 @@ type Target struct {
 	Host string
 	IP   string
 	Port int
+	// Protocol is the transport the port was found on. The zero value is
+	// protocol.TCP, so existing TCP callers need no change; the runner sets
+	// it to protocol.UDP for UDP ports so service detection routes them to
+	// the native UDP engine instead of the TCP probe engine.
+	Protocol protocol.Protocol
 	// TLSDetected indicates whether TLS was detected during port scanning.
 	TLSDetected bool
 	// TLSChecked indicates that TLS detection was already performed during the

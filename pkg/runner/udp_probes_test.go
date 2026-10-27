@@ -99,11 +99,11 @@ func TestInitUDPProbesDisabledClearsStaleProvider(t *testing.T) {
 	}
 }
 
-// TestInitUDPProbesMissingFileClearsStaleProvider documents the same
-// invariant for the failure path: enabling -uP without a discoverable
-// nmap-service-probes file must not silently keep a previous run's
-// adapter active on the scanner.
-func TestInitUDPProbesMissingFileClearsStaleProvider(t *testing.T) {
+// TestInitUDPProbesMissingFileUsesBuiltin documents the nmap-free contract:
+// enabling -uP without a discoverable nmap-service-probes file no longer
+// disables the feature — the native UDP engine supplies built-in payloads, so
+// the provider is installed and answers for known ports (DNS/53).
+func TestInitUDPProbesMissingFileUsesBuiltin(t *testing.T) {
 	scanner := newScannerWithStaleProvider([]byte{0xBE, 0xEF})
 
 	r := &Runner{
@@ -112,11 +112,15 @@ func TestInitUDPProbesMissingFileClearsStaleProvider(t *testing.T) {
 	}
 	r.initUDPProbes()
 
-	if got := scanner.UDPProbeProvider; got != nil {
-		t.Fatalf("stale provider leaked on load failure (scanner): %#v, want nil", got)
+	if scanner.UDPProbeProvider == nil {
+		t.Fatal("expected a built-in UDP probe provider to be installed")
 	}
-	if got := scanner.ListenHandler.UDPProbeProvider; got != nil {
-		t.Fatalf("stale provider leaked on load failure (handler): %#v, want nil", got)
+	if got := scanner.UDPProbeProvider.UDPProbe(53); len(got) == 0 {
+		t.Fatal("built-in provider returned no payload for DNS/53")
+	}
+	// A port no plugin owns yields no payload (and there is no nmap DB to fall back to).
+	if got := scanner.UDPProbeProvider.UDPProbe(9); len(got) != 0 {
+		t.Fatalf("UDPProbe(9) = %x, want empty (no plugin, no nmap DB)", got)
 	}
 }
 

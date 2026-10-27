@@ -27,6 +27,8 @@ import (
 	"github.com/projectdiscovery/gologger"
 	"github.com/projectdiscovery/mapcidr"
 	"github.com/projectdiscovery/naabu/v2/pkg/fingerprint"
+	"github.com/projectdiscovery/naabu/v2/pkg/fingerprint/udp"
+	udpservices "github.com/projectdiscovery/naabu/v2/pkg/fingerprint/udp/services"
 	"github.com/projectdiscovery/naabu/v2/pkg/macvendor"
 	"github.com/projectdiscovery/naabu/v2/pkg/port"
 	"github.com/projectdiscovery/naabu/v2/pkg/privileges"
@@ -85,7 +87,11 @@ type Runner struct {
 	// XML/greppable output timestamps and elapsed time.
 	scanStartTime time.Time
 
-	fpTargetCh chan fingerprint.Target
+	// fpTCPCh and fpUDPCh feed the TCP (nmap-probe) and UDP (native) detection
+	// engines respectively; the forwarder routes each queued target to one of
+	// them by transport, converting to the UDP engine's target type as it goes.
+	fpTCPCh chan fingerprint.Target
+	fpUDPCh chan udp.Target
 	// fpQueue decouples the scan hot path from the fingerprint workers so fast
 	// discovery never blocks the scan nor silently drops -sV targets.
 	fpQueue    *fpQueue
@@ -98,6 +104,10 @@ type Runner struct {
 	// injection path (-uP). It is nil until one of those features
 	// triggers a successful load.
 	probeDB *fingerprint.ProbeDB
+	// udpEngine is the native UDP service-detection engine. It is built once
+	// and reused for both -sV UDP detection and -uP discovery payloads, and is
+	// independent of nmap-service-probes.
+	udpEngine *udp.Engine
 }
 
 type Target struct {
@@ -373,6 +383,7 @@ func (r *Runner) onReceive(hostResult *result.HostResult) {
 				Host:        hostname,
 				IP:          hostResult.IP,
 				Port:        p.Port,
+				Protocol:    p.Protocol,
 				TLSDetected: p.TLS, //nolint:staticcheck // deprecated but still set by scan layer
 				TLSChecked:  tlsChecked,
 			})
@@ -1418,87 +1429,69 @@ func (r *Runner) initServiceDetection(parentCtx context.Context) {
 		return
 	}
 
-	probeFile := r.options.ServiceProbesFile
-	if probeFile == "" {
-		probeFile = fingerprint.LocateNmapProbes()
-	}
-	if probeFile == "" {
-		gologger.Warning().Msgf("could not find nmap-service-probes, skipping -sV. Install nmap or specify the path with --sV-probes")
-		r.options.ServiceVersion = false
+	// TCP service version detection relies on the nmap-service-probes database.
+	// UDP detection is native (nmap-independent), so a missing probe file only
+	// disables the TCP lane — UDP -sV still runs.
+	tcpEngine := r.newTCPFingerprintEngine()
+	if tcpEngine == nil {
 		scan.EnableTLSDetection = false
+	}
+
+	// Native UDP engine: dials directly, so when a proxy is configured UDP
+	// detection is skipped (SOCKS5 UDP relaying is out of scope).
+	var udpEngine *udp.Engine
+	if r.options.Proxy == "" {
+		udpEngine = r.ensureUDPEngine()
+	} else {
+		gologger.Warning().Msgf("UDP service detection is skipped while a proxy is configured")
+	}
+
+	if tcpEngine == nil && udpEngine == nil {
+		gologger.Warning().Msgf("no service detection engine is available, skipping -sV")
+		r.options.ServiceVersion = false
 		return
 	}
-
-	db, err := r.loadProbeDB(probeFile)
-	if err != nil {
-		gologger.Warning().Msgf("could not load service probes from %s, skipping -sV", probeFile)
-		r.options.ServiceVersion = false
-		scan.EnableTLSDetection = false
-		return
-	}
-
-	var opts []fingerprint.Option
-	opts = append(opts, fingerprint.WithWorkers(r.options.ServiceVersionWorkers))
-	opts = append(opts, fingerprint.WithTimeout(r.options.ServiceVersionTimeout))
-	opts = append(opts, fingerprint.WithFastMode(r.options.ServiceVersionFast))
-
-	if r.options.Proxy != "" {
-		proxyURL := r.options.Proxy
-		if !strings.Contains(proxyURL, "://") {
-			proxyURL = "socks5://" + proxyURL
-		}
-		if r.options.ProxyAuth != "" {
-			if u, err := url.Parse(proxyURL); err == nil {
-				creds := strings.SplitN(r.options.ProxyAuth, ":", 2)
-				if len(creds) == 2 {
-					u.User = url.UserPassword(creds[0], creds[1])
-					proxyURL = u.String()
-				}
-			}
-		}
-		parsedURL, err := url.Parse(proxyURL)
-		if err == nil {
-			dialer, err := proxy.FromURL(parsedURL, proxy.Direct)
-			if err == nil {
-				opts = append(opts, fingerprint.WithDialer(func(ctx context.Context, network, address string) (net.Conn, error) {
-					return dialer.Dial(network, address)
-				}))
-			}
-		}
-	}
-
-	engine := fingerprint.New(db, opts...)
 
 	ctx, cancel := context.WithCancel(parentCtx)
 	r.fpCancel = cancel
-	r.fpTargetCh = make(chan fingerprint.Target, 1000)
+	r.fpTCPCh = make(chan fingerprint.Target, 1000)
+	r.fpUDPCh = make(chan udp.Target, 1000)
 	r.fpQueue = newFpQueue()
 	r.fpDone = make(chan struct{})
 	r.fpServices = make(map[string]*port.Service)
 
-	resultCh := engine.FingerprintStream(ctx, r.fpTargetCh)
-
-	// Forward queued targets into the engine. The bounded queue absorbs bursts
-	// from fast discovery (with backpressure at capacity); this goroutine blocks
-	// on the engine channel instead of dropping, and closes fpTargetCh once the
-	// queue is closed and drained. It captures the queue and channel as locals so
-	// waitServiceDetection can clear the Runner fields without racing this loop.
+	// Forward queued targets to the engine that matches their transport. The
+	// bounded queue absorbs discovery bursts with backpressure; this goroutine
+	// blocks on the engine channels instead of dropping, and closes both once
+	// the queue is drained. Locals are captured so waitServiceDetection can
+	// clear the Runner fields without racing this loop.
 	q := r.fpQueue
-	ch := r.fpTargetCh
+	tcpCh, udpCh := r.fpTCPCh, r.fpUDPCh
 	go func() {
+		defer close(tcpCh)
+		defer close(udpCh)
 		for {
 			t, ok := q.pop()
 			if !ok {
-				close(ch)
 				return
 			}
-			// The engine stops draining ch once ctx is cancelled; select on
-			// ctx.Done() so a full channel can't block this forwarder forever
-			// (leaking the goroutine and its retained target backlog).
+			if t.Protocol == protocol.UDP {
+				if udpEngine == nil {
+					continue // no UDP engine (e.g. proxy configured): drop
+				}
+				select {
+				case udpCh <- udp.Target{Host: t.Host, IP: t.IP, Port: t.Port}:
+				case <-ctx.Done():
+					return
+				}
+				continue
+			}
+			if tcpEngine == nil {
+				continue // no nmap probe DB: drop TCP targets
+			}
 			select {
-			case ch <- t:
+			case tcpCh <- t:
 			case <-ctx.Done():
-				close(ch)
 				return
 			}
 		}
@@ -1506,16 +1499,145 @@ func (r *Runner) initServiceDetection(parentCtx context.Context) {
 
 	gologger.Info().Msgf("Fingerprinting open port(s) with %d workers", r.options.ServiceVersionWorkers)
 
+	// One collector goroutine per active engine; fpDone closes once both drain.
+	var wg sync.WaitGroup
+	if tcpEngine != nil {
+		wg.Add(1)
+		results := tcpEngine.FingerprintStream(ctx, r.fpTCPCh)
+		go func() {
+			defer wg.Done()
+			for sr := range results {
+				r.storeService(protocol.TCP, sr.IP, sr.Port, sr.Service)
+			}
+		}()
+	}
+	if udpEngine != nil {
+		wg.Add(1)
+		results := udpEngine.FingerprintStream(ctx, r.fpUDPCh)
+		go func() {
+			defer wg.Done()
+			for sr := range results {
+				r.storeService(protocol.UDP, sr.IP, sr.Port, udpResultToService(sr.Service))
+			}
+		}()
+	}
 	go func() {
-		defer close(r.fpDone)
-		for sr := range resultCh {
-			key := net.JoinHostPort(sr.IP, strconv.Itoa(sr.Port))
-			r.fpMu.Lock()
-			r.fpServices[key] = sr.Service
-			r.fpMu.Unlock()
-			gologger.Verbose().Msgf("Identified %s on %s:%d (%s %s)", sr.Service.Name, sr.IP, sr.Port, sr.Service.Product, sr.Service.Version)
-		}
+		wg.Wait()
+		close(r.fpDone)
 	}()
+}
+
+// storeService records a detected service keyed by transport so a TCP and a UDP
+// service on the same port number never clobber each other.
+func (r *Runner) storeService(proto protocol.Protocol, ip string, portNum int, svc *port.Service) {
+	if svc == nil {
+		return
+	}
+	r.fpMu.Lock()
+	r.fpServices[fpServiceKey(proto, ip, portNum)] = svc
+	r.fpMu.Unlock()
+	gologger.Verbose().Msgf("Identified %s on %s/%s:%d (%s %s)", svc.Name, proto.String(), ip, portNum, svc.Product, svc.Version)
+}
+
+// fpServiceKey builds the transport-qualified lookup key for fpServices.
+func fpServiceKey(proto protocol.Protocol, ip string, portNum int) string {
+	return proto.String() + "/" + net.JoinHostPort(ip, strconv.Itoa(portNum))
+}
+
+// newTCPFingerprintEngine builds the nmap-probe-backed TCP engine, or nil when
+// the probe database cannot be located or parsed.
+func (r *Runner) newTCPFingerprintEngine() *fingerprint.Engine {
+	probeFile := r.options.ServiceProbesFile
+	if probeFile == "" {
+		probeFile = fingerprint.LocateNmapProbes()
+	}
+	if probeFile == "" {
+		gologger.Warning().Msgf("could not find nmap-service-probes; TCP -sV is disabled (UDP -sV is unaffected). Install nmap or specify the path with --sV-probes")
+		return nil
+	}
+	db, err := r.loadProbeDB(probeFile)
+	if err != nil {
+		gologger.Warning().Msgf("could not load service probes from %s; TCP -sV is disabled: %s", probeFile, err)
+		return nil
+	}
+
+	opts := []fingerprint.Option{
+		fingerprint.WithWorkers(r.options.ServiceVersionWorkers),
+		fingerprint.WithTimeout(r.options.ServiceVersionTimeout),
+		fingerprint.WithFastMode(r.options.ServiceVersionFast),
+	}
+	if dialer := r.proxyDialer(); dialer != nil {
+		opts = append(opts, fingerprint.WithDialer(func(ctx context.Context, network, address string) (net.Conn, error) {
+			return dialer.Dial(network, address)
+		}))
+	}
+	return fingerprint.New(db, opts...)
+}
+
+// proxyDialer returns a SOCKS5/HTTP dialer for the configured proxy, or nil
+// when no proxy is set or the proxy URL is invalid.
+func (r *Runner) proxyDialer() proxy.Dialer {
+	if r.options.Proxy == "" {
+		return nil
+	}
+	proxyURL := r.options.Proxy
+	if !strings.Contains(proxyURL, "://") {
+		proxyURL = "socks5://" + proxyURL
+	}
+	if r.options.ProxyAuth != "" {
+		if u, err := url.Parse(proxyURL); err == nil {
+			creds := strings.SplitN(r.options.ProxyAuth, ":", 2)
+			if len(creds) == 2 {
+				u.User = url.UserPassword(creds[0], creds[1])
+				proxyURL = u.String()
+			}
+		}
+	}
+	parsedURL, err := url.Parse(proxyURL)
+	if err != nil {
+		return nil
+	}
+	dialer, err := proxy.FromURL(parsedURL, proxy.Direct)
+	if err != nil {
+		return nil
+	}
+	return dialer
+}
+
+// ensureUDPEngine builds the native UDP detection engine once and caches it on
+// the runner. It is nmap-independent and serves both -sV UDP detection and -uP
+// discovery payloads.
+func (r *Runner) ensureUDPEngine() *udp.Engine {
+	if r.udpEngine != nil {
+		return r.udpEngine
+	}
+	var opts []udp.Option
+	if r.options.ServiceVersionTimeout > 0 {
+		opts = append(opts, udp.WithTimeout(r.options.ServiceVersionTimeout))
+	}
+	if r.options.ServiceVersionWorkers > 0 {
+		opts = append(opts, udp.WithWorkers(r.options.ServiceVersionWorkers))
+	}
+	opts = append(opts, udp.WithFastMode(r.options.ServiceVersionFast))
+	r.udpEngine = udp.NewEngine(udpservices.All(), opts...)
+	return r.udpEngine
+}
+
+// udpResultToService maps a native UDP detection result onto the flat
+// port.Service the rest of the runner and the output path already understand.
+func udpResultToService(r *udp.Result) *port.Service {
+	if r == nil {
+		return nil
+	}
+	return &port.Service{
+		Name:      r.Name,
+		Product:   r.Product,
+		Version:   r.Version,
+		ExtraInfo: r.ExtraInfo,
+		Banner:    r.Banner,
+		Method:    "probes",
+		CPEs:      r.CPEs,
+	}
 }
 
 func (r *Runner) waitServiceDetection(scanResults *result.Result) {
@@ -1530,16 +1652,18 @@ func (r *Runner) waitServiceDetection(scanResults *result.Result) {
 		return
 	}
 	// Close the queue (the forwarder drains the remaining targets and then closes
-	// fpTargetCh, which ends the engine). Only clear fpTargetCh after fpDone so the
-	// forwarder has finished and a reused Runner (SDK) can start a fresh cycle.
+	// the engine channels, which ends the engines). Only clear the channels after
+	// fpDone so the forwarder has finished and a reused Runner (SDK) can start a
+	// fresh cycle.
 	q.close()
 	<-r.fpDone
-	r.fpTargetCh = nil
+	r.fpTCPCh = nil
+	r.fpUDPCh = nil
 
 	if scanResults != nil {
 		for hostResult := range scanResults.GetIPsPorts() {
 			for _, p := range hostResult.Ports {
-				key := net.JoinHostPort(hostResult.IP, strconv.Itoa(p.Port))
+				key := fpServiceKey(p.Protocol, hostResult.IP, p.Port)
 				if svc, ok := r.fpServices[key]; ok {
 					p.Service = svc
 					scanResults.UpdatePortService(hostResult.IP, p)
